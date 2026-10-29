@@ -1,83 +1,108 @@
 """
 hand_tracking.py
 Real-time hand detection, landmark extraction, and gesture recognition
-powered by MediaPipe Hands and OpenCV.
+powered by Google MediaPipe Tasks API and OpenCV.
+Optimized for Apple Silicon Neural Engine / Metal GPU acceleration.
 """
 
+import os
+import sys
 import math
 import time
+import urllib.request
 import numpy as np
 import cv2
+
+# Set writable directory for matplotlib cache to avoid warnings
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import HandLandmarksConnections
+
+MODEL_FILENAME = "hand_landmarker.task"
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
 
 class HandDetector:
-    def __init__(self, mode=False, max_hands=1, detection_con=0.75, track_con=0.75):
-        self.mode = mode
+    def __init__(self, model_path=None, max_hands=1, detection_con=0.7, track_con=0.7):
         self.max_hands = max_hands
         self.detection_con = detection_con
         self.track_con = track_con
 
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=self.mode,
-            max_num_hands=self.max_hands,
-            min_detection_confidence=self.detection_con,
+        # Resolve model path
+        if model_path is None:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.model_path = os.path.join(base_dir, MODEL_FILENAME)
+        else:
+            self.model_path = model_path
+
+        # Auto-download model if missing
+        if not os.path.exists(self.model_path):
+            print(f"Downloading MediaPipe model to {self.model_path}...")
+            urllib.request.urlretrieve(MODEL_URL, self.model_path)
+            print("Model download complete.")
+
+        # Initialize MediaPipe HandLandmarker
+        base_options = python.BaseOptions(model_asset_path=self.model_path)
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            num_hands=self.max_hands,
+            min_hand_detection_confidence=self.detection_con,
             min_tracking_confidence=self.track_con
         )
-        self.mp_draw = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
+        self.detector = vision.HandLandmarker.create_from_options(options)
 
-        # Custom high-tech neon drawing style matching the Instagram reel
+        # Neon color palette matching the viral reel
         self.neon_green = (0, 255, 80)
         self.neon_cyan = (255, 255, 0)
         self.neon_yellow = (0, 220, 255)
         self.neon_magenta = (255, 0, 255)
 
-        self.results = None
+        self.connections = HandLandmarksConnections.HAND_CONNECTIONS
         self.tip_ids = [4, 8, 12, 16, 20]
+        self.results = None
 
     def find_hands(self, img, draw=True):
-        """Processes frame through MediaPipe and optionally draws neon skeleton."""
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        self.results = self.hands.process(img_rgb)
+        """Processes frame through MediaPipe and draws neon skeleton lines and nodes."""
+        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        self.results = self.detector.detect(mp_image)
 
-        if self.results.multi_hand_landmarks and draw:
-            for hand_lms in self.results.multi_hand_landmarks:
-                h, w, c = img.shape
-
-                # Draw custom neon green skeleton lines
-                connections = self.mp_hands.HAND_CONNECTIONS
-                for conn in connections:
-                    pt1_idx, pt2_idx = conn
-                    lm1 = hand_lms.landmark[pt1_idx]
-                    lm2 = hand_lms.landmark[pt2_idx]
+        if self.results.hand_landmarks and draw:
+            h, w, _ = img.shape
+            for hand_lms in self.results.hand_landmarks:
+                # 1. Draw glowing neon skeleton lines
+                for conn in self.connections:
+                    lm1 = hand_lms[conn.start]
+                    lm2 = hand_lms[conn.end]
                     cx1, cy1 = int(lm1.x * w), int(lm1.y * h)
                     cx2, cy2 = int(lm2.x * w), int(lm2.y * h)
-                    # Glowing line effect (thicker dark green base + thinner bright neon core)
-                    cv2.line(img, (cx1, cy1), (cx2, cy2), (0, 180, 40), 3)
-                    cv2.line(img, (cx1, cy1), (cx2, cy2), self.neon_green, 2)
+                    # Glowing effect: thicker base + bright neon core
+                    cv2.line(img, (cx1, cy1), (cx2, cy2), (0, 180, 40), 3, cv2.LINE_AA)
+                    cv2.line(img, (cx1, cy1), (cx2, cy2), self.neon_green, 2, cv2.LINE_AA)
 
-                # Draw landmark joint nodes
-                for idx, lm in enumerate(hand_lms.landmark):
+                # 2. Draw landmark joints
+                for idx, lm in enumerate(hand_lms):
                     cx, cy = int(lm.x * w), int(lm.y * h)
                     if idx in self.tip_ids:
-                        # Highlight fingertips with larger halo circles
-                        cv2.circle(img, (cx, cy), 8, self.neon_yellow, 2)
-                        cv2.circle(img, (cx, cy), 4, self.neon_green, cv2.FILLED)
+                        # Highlight fingertip halos
+                        cv2.circle(img, (cx, cy), 8, self.neon_yellow, 2, cv2.LINE_AA)
+                        cv2.circle(img, (cx, cy), 4, self.neon_green, cv2.FILLED, cv2.LINE_AA)
                     else:
-                        cv2.circle(img, (cx, cy), 4, self.neon_green, cv2.FILLED)
+                        cv2.circle(img, (cx, cy), 4, self.neon_green, cv2.FILLED, cv2.LINE_AA)
 
         return img
 
     def find_position(self, img, hand_no=0):
-        """Returns list of all 21 landmark positions in pixel coordinates [id, cx, cy]."""
+        """Returns list of all 21 landmark positions in pixel coordinates [id, cx, cy, x_norm, y_norm]."""
         lm_list = []
-        if self.results and self.results.multi_hand_landmarks:
-            if hand_no < len(self.results.multi_hand_landmarks):
-                my_hand = self.results.multi_hand_landmarks[hand_no]
-                h, w, c = img.shape
-                for idx, lm in enumerate(my_hand.landmark):
+        if self.results and self.results.hand_landmarks:
+            if hand_no < len(self.results.hand_landmarks):
+                my_hand = self.results.hand_landmarks[hand_no]
+                h, w, _ = img.shape
+                for idx, lm in enumerate(my_hand):
                     cx, cy = int(lm.x * w), int(lm.y * h)
                     lm_list.append([idx, cx, cy, lm.x, lm.y])
         return lm_list
@@ -92,17 +117,13 @@ class HandDetector:
 
         fingers = []
 
-        # Thumb: compare tip (4) with IP joint (3) or MCP (2) based on hand orientation
-        # Hand is mirrored, so check horizontal distance from wrist or MCP
-        is_right_oriented = lm_list[4][1] > lm_list[3][1]
-        # Dist from thumb tip to pinky MCP (17) vs thumb IP (3) to pinky MCP
+        # Thumb: compare tip (4) with MCP/IP joints relative to pinky base (17)
         thumb_tip_dist = math.hypot(lm_list[4][1] - lm_list[17][1], lm_list[4][2] - lm_list[17][2])
         thumb_ip_dist = math.hypot(lm_list[3][1] - lm_list[17][1], lm_list[3][2] - lm_list[17][2])
         fingers.append(thumb_tip_dist > thumb_ip_dist * 1.15)
 
-        # 4 Fingers: Tip Y must be above (lower value on image coordinate) PIP joint Y
+        # 4 Fingers: Tip Y must be above (smaller value in screen coords) PIP joint (tip_id - 2)
         for tip_id in [8, 12, 16, 20]:
-            # Tip vs PIP (tip_id - 2)
             if lm_list[tip_id][2] < lm_list[tip_id - 2][2]:
                 fingers.append(True)
             else:
@@ -121,9 +142,9 @@ class HandDetector:
         length = math.hypot(x2 - x1, y2 - y1)
 
         if draw and img is not None:
-            cv2.line(img, (x1, y1), (x2, y2), self.neon_cyan, 2)
-            cv2.circle(img, (x1, y1), 6, self.neon_yellow, cv2.FILLED)
-            cv2.circle(img, (x2, y2), 6, self.neon_yellow, cv2.FILLED)
-            cv2.circle(img, (cx, cy), 6, self.neon_cyan, cv2.FILLED)
+            cv2.line(img, (x1, y1), (x2, y2), self.neon_cyan, 2, cv2.LINE_AA)
+            cv2.circle(img, (x1, y1), 6, self.neon_yellow, cv2.FILLED, cv2.LINE_AA)
+            cv2.circle(img, (x2, y2), 6, self.neon_yellow, cv2.FILLED, cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), 6, self.neon_cyan, cv2.FILLED, cv2.LINE_AA)
 
         return length, (cx, cy), img
